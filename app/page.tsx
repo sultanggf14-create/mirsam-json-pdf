@@ -15,35 +15,13 @@ type Result = {
   }>;
 };
 
-const sampleResult = (file: File, pages: number): Result => ({
-  document: { file_name: file.name, pages, language: "ar" },
-  questions: [
-    {
-      id: "q-001",
-      page: 1,
-      text: "نص السؤال المستخرج سيظهر هنا بعد ربط محرك التحليل.",
-      type: "geometry",
-      choices: ["30°", "45°", "60°", "90°"],
-      diagram: {
-        format: "image+structured",
-        source: "diagrams/q-001.png",
-        objects: [
-          { type: "point", id: "A", x: 120, y: 280 },
-          { type: "line", from: "A", to: "B" },
-          { type: "angle", vertex: "A", label: "س" },
-        ],
-      },
-      confidence: { text: 0.97, diagram: 0.84 },
-    },
-  ],
-});
-
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [pages, setPages] = useState(0);
   const [status, setStatus] = useState<"idle" | "ready" | "working" | "done">("idle");
   const [result, setResult] = useState<Result | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [error, setError] = useState("");
 
   const json = useMemo(() => (result ? JSON.stringify(result, null, 2) : ""), [result]);
 
@@ -52,6 +30,7 @@ export default function Home() {
     setFile(candidate);
     setStatus("ready");
     setResult(null);
+    setError("");
     try {
       const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
       const data = new Uint8Array(await candidate.arrayBuffer());
@@ -75,9 +54,19 @@ export default function Home() {
   async function analyze() {
     if (!file) return;
     setStatus("working");
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-    setResult(sampleResult(file, pages));
-    setStatus("done");
+    setError("");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const response = await fetch("/api/analyze", { method: "POST", body: form });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "فشل تحليل الملف");
+      setResult(data as Result);
+      setStatus("done");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "تعذر تحليل الملف");
+      setStatus("ready");
+    }
   }
 
   function download() {
@@ -119,6 +108,7 @@ export default function Home() {
           <button className="primary" disabled={!file || status === "working"} onClick={analyze}>
             {status === "working" ? "جارٍ تحليل الصفحات..." : "ابدأ التحويل"}<span>←</span>
           </button>
+          {error && <p className="error-message" role="alert">{error}</p>}
           <p className="privacy">◈ تتم قراءة الملف محلياً في هذه النسخة ولا يُرفع إلى خادم.</p>
         </div>
 
