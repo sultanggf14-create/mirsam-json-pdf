@@ -1,5 +1,3 @@
-import { env } from "cloudflare:workers";
-
 const schema = {
   type: "object",
   additionalProperties: false,
@@ -74,7 +72,7 @@ const schema = {
 
 export async function POST(request: Request) {
   try {
-    const key = (env as unknown as { OPENAI_API_KEY?: string }).OPENAI_API_KEY;
+    const key = process.env.OPENAI_API_KEY;
     if (!key) return Response.json({ error: "مفتاح OpenAI غير مضبوط." }, { status: 500 });
 
     const form = await request.formData();
