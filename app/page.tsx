@@ -56,17 +56,68 @@ export default function Home() {
     setStatus("working");
     setError("");
     try {
-      const form = new FormData();
-      form.append("file", file);
-      const response = await fetch("/api/analyze", { method: "POST", body: form });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "فشل تحليل الملف");
-      setResult(data as Result);
+      let data: Result;
+      if (file.size <= 7 * 1024 * 1024) {
+        const form = new FormData();
+        form.append("file", file);
+        const response = await fetch("/api/analyze", { method: "POST", body: form });
+        data = await readApiResponse(response);
+      } else {
+        data = await analyzeLargePdf(file);
+      }
+      setResult(data);
       setStatus("done");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "تعذر تحليل الملف");
       setStatus("ready");
     }
+  }
+
+  async function analyzeLargePdf(pdfFile: File): Promise<Result> {
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const pdf = await pdfjs.getDocument({ data: new Uint8Array(await pdfFile.arrayBuffer()), disableWorker: true }).promise;
+    const allQuestions: Result["questions"] = [];
+
+    for (let start = 1; start <= pdf.numPages; start += 2) {
+      const images: string[] = [];
+      for (let pageNumber = start; pageNumber <= Math.min(start + 1, pdf.numPages); pageNumber++) {
+        const page = await pdf.getPage(pageNumber);
+        const initial = page.getViewport({ scale: 1 });
+        const scale = Math.min(2, 1600 / initial.width);
+        const viewport = page.getViewport({ scale });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("تعذر تجهيز صفحة PDF للتحليل.");
+        await page.render({ canvasContext: context, viewport }).promise;
+        images.push(canvas.toDataURL("image/jpeg", 0.82));
+      }
+
+      const response = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ images, filename: pdfFile.name, pageOffset: start - 1 }),
+      });
+      const batch = await readApiResponse(response);
+      allQuestions.push(...batch.questions);
+    }
+
+    return {
+      document: { file_name: pdfFile.name, pages: pdf.numPages, language: "ar" },
+      questions: allQuestions,
+    };
+  }
+
+  async function readApiResponse(response: Response): Promise<Result> {
+    const contentType = response.headers.get("content-type") ?? "";
+    if (!contentType.includes("application/json")) {
+      if (response.status === 413) throw new Error("الملف كبير جداً. سيتم تقسيمه إلى صفحات عند المحاولة التالية.");
+      throw new Error(`تعذر تحليل الملف (خطأ ${response.status}).`);
+    }
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "فشل تحليل الملف");
+    return data as Result;
   }
 
   function download() {

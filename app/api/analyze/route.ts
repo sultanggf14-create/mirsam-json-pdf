@@ -74,17 +74,38 @@ export async function POST(request: Request) {
   try {
     const key = process.env.OPENAI_API_KEY;
     if (!key) return Response.json({ error: "مفتاح OpenAI غير مضبوط." }, { status: 500 });
+    const contentType = request.headers.get("content-type") ?? "";
+    let filename = "document.pdf";
+    let pageOffset = 0;
+    const inputContent: Array<Record<string, string>> = [];
 
-    const form = await request.formData();
-    const file = form.get("file");
-    if (!(file instanceof File) || file.type !== "application/pdf") {
-      return Response.json({ error: "يجب اختيار ملف PDF صالح." }, { status: 400 });
-    }
-    if (file.size > 20 * 1024 * 1024) {
-      return Response.json({ error: "حجم الملف يتجاوز 20 ميجابايت." }, { status: 413 });
+    if (contentType.includes("application/json")) {
+      const body = await request.json() as { images?: string[]; filename?: string; pageOffset?: number };
+      const images = body.images ?? [];
+      if (!images.length || images.length > 2 || images.some((image) => !image.startsWith("data:image/jpeg;base64,"))) {
+        return Response.json({ error: "دفعة الصفحات غير صالحة." }, { status: 400 });
+      }
+      filename = body.filename?.slice(0, 160) || filename;
+      pageOffset = Math.max(0, body.pageOffset ?? 0);
+      images.forEach((image) => inputContent.push({ type: "input_image", image_url: image }));
+    } else {
+      const form = await request.formData();
+      const file = form.get("file");
+      if (!(file instanceof File) || file.type !== "application/pdf") {
+        return Response.json({ error: "يجب اختيار ملف PDF صالح." }, { status: 400 });
+      }
+      if (file.size > 7 * 1024 * 1024) {
+        return Response.json({ error: "استخدم وضع تقسيم الصفحات للملفات الكبيرة." }, { status: 413 });
+      }
+      filename = file.name;
+      const base64 = Buffer.from(await file.arrayBuffer()).toString("base64");
+      inputContent.push({ type: "input_file", filename: file.name, file_data: `data:application/pdf;base64,${base64}` });
     }
 
-    const base64 = Buffer.from(await file.arrayBuffer()).toString("base64");
+    inputContent.push({
+      type: "input_text",
+      text: `حلّل الأسئلة في الملف ${filename}. أرقام الصفحات في هذه الدفعة تبدأ من ${pageOffset + 1}. استخرج كل سؤال وخياراته ورقمه وصفحته الأصلية. أعد إنشاء أي رسم هندسي أو رسم بياني كـSVG نظيف ودقيق، واكتب عناصره وإحداثياته. لا تخمّن الإجابة؛ استخدم null إذا لم تكن مذكورة صراحة. حافظ على النص العربي والرموز الرياضية كما تظهر.`,
+    });
     const openai = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
@@ -93,10 +114,7 @@ export async function POST(request: Request) {
         reasoning: { effort: "medium" },
         input: [{
           role: "user",
-          content: [
-            { type: "input_file", filename: file.name, file_data: `data:application/pdf;base64,${base64}` },
-            { type: "input_text", text: "حلّل ملف الأسئلة كاملاً. استخرج كل سؤال وخياراته ورقمه وصفحته. أعد إنشاء أي رسم هندسي أو رسم بياني كـSVG نظيف ودقيق، واكتب عناصره وإحداثياته. لا تخمّن الإجابة؛ استخدم null إذا لم تكن مذكورة صراحة. حافظ على النص العربي والرموز الرياضية كما تظهر." },
-          ],
+          content: inputContent,
         }],
         text: { format: { type: "json_schema", name: "question_document", strict: true, schema } },
       }),
