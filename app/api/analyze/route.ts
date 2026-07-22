@@ -1,0 +1,121 @@
+export const runtime = "nodejs";
+
+const schema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["document", "questions"],
+  properties: {
+    document: {
+      type: "object",
+      additionalProperties: false,
+      required: ["title", "language", "pages"],
+      properties: {
+        title: { type: "string" },
+        language: { type: "string" },
+        pages: { type: "integer" },
+      },
+    },
+    questions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "page", "text", "type", "choices", "answer", "diagram", "confidence"],
+        properties: {
+          id: { type: "string" },
+          page: { type: "integer" },
+          text: { type: "string" },
+          type: { type: "string", enum: ["text", "geometry", "chart", "table", "mixed"] },
+          choices: { type: "array", items: { type: "string" } },
+          answer: { type: ["string", "null"] },
+          diagram: {
+            anyOf: [
+              { type: "null" },
+              {
+                type: "object",
+                additionalProperties: false,
+                required: ["kind", "description", "svg", "objects"],
+                properties: {
+                  kind: { type: "string", enum: ["geometry", "chart", "table", "other"] },
+                  description: { type: "string" },
+                  svg: { type: "string", description: "Self-contained SVG recreating the diagram." },
+                  objects: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      additionalProperties: false,
+                      required: ["type", "label", "coordinates", "value"],
+                      properties: {
+                        type: { type: "string" },
+                        label: { type: "string" },
+                        coordinates: { type: "array", items: { type: "number" } },
+                        value: { type: ["string", "null"] },
+                      },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+          confidence: {
+            type: "object",
+            additionalProperties: false,
+            required: ["text", "diagram"],
+            properties: {
+              text: { type: "number", minimum: 0, maximum: 1 },
+              diagram: { type: "number", minimum: 0, maximum: 1 },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
+export async function POST(request: Request) {
+  try {
+    const key = process.env.OPENAI_API_KEY;
+    if (!key) return Response.json({ error: "مفتاح OpenAI غير مضبوط." }, { status: 500 });
+
+    const form = await request.formData();
+    const file = form.get("file");
+    if (!(file instanceof File) || file.type !== "application/pdf") {
+      return Response.json({ error: "يجب اختيار ملف PDF صالح." }, { status: 400 });
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      return Response.json({ error: "حجم الملف يتجاوز 20 ميجابايت." }, { status: 413 });
+    }
+
+    const base64 = Buffer.from(await file.arrayBuffer()).toString("base64");
+    const openai = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.6-sol",
+        reasoning: { effort: "medium" },
+        input: [{
+          role: "user",
+          content: [
+            { type: "input_file", filename: file.name, file_data: `data:application/pdf;base64,${base64}` },
+            { type: "input_text", text: "حلّل ملف الأسئلة كاملاً. استخرج كل سؤال وخياراته ورقمه وصفحته. أعد إنشاء أي رسم هندسي أو رسم بياني كـSVG نظيف ودقيق، واكتب عناصره وإحداثياته. لا تخمّن الإجابة؛ استخدم null إذا لم تكن مذكورة صراحة. حافظ على النص العربي والرموز الرياضية كما تظهر." },
+          ],
+        }],
+        text: { format: { type: "json_schema", name: "question_document", strict: true, schema } },
+      }),
+    });
+
+    const payload = await openai.json() as Record<string, unknown>;
+    if (!openai.ok) {
+      const apiError = payload.error as { message?: string } | undefined;
+      return Response.json({ error: apiError?.message ?? "فشل تحليل الملف." }, { status: openai.status });
+    }
+
+    const output = payload.output as Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }> | undefined;
+    const text = output?.flatMap((item) => item.content ?? []).find((item) => item.type === "output_text")?.text;
+    if (!text) return Response.json({ error: "لم يرجع المحرك نتيجة قابلة للقراءة." }, { status: 502 });
+    return Response.json(JSON.parse(text));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "حدث خطأ غير متوقع.";
+    return Response.json({ error: message }, { status: 500 });
+  }
+}
